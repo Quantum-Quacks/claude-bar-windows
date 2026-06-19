@@ -9,6 +9,8 @@ menu-bar app [tulinmola/claude-bar](https://github.com/tulinmola/claude-bar)
 (via the [Quantum-Quacks](https://github.com/Quantum-Quacks/claude-bar) fork).
 All credit for the original idea and design goes to tulinmola.
 
+![Claude Bar in the Windows system tray](docs/tray.png)
+
 It reuses the credentials Claude Code already stored on your machine, so there's
 no separate login. It's **read-only** and never makes inference calls.
 
