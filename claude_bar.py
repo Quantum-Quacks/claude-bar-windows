@@ -55,6 +55,48 @@ def bar_color(pct):
 
 
 # ---------------------------------------------------------------------------
+# Settings (persisted to ~/.claude-bar-windows.json)
+# ---------------------------------------------------------------------------
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".claude-bar-windows.json")
+
+DEFAULT_SETTINGS = {
+    # "Running low" alerts: warn when usage climbs past a threshold.
+    "low_enabled": True,
+    "session_threshold": 80,        # %
+    "weekly_threshold": 80,         # %
+    # "Unused quota" reminders: warn when a window is about to reset but you
+    # still have lots of quota left (low utilization) — use it or lose it.
+    "unused_enabled": False,
+    "session_unused_minutes": 30,   # remind when session resets within N minutes
+    "weekly_unused_hours": 12,      # remind when weekly resets within N hours
+    "unused_max_util": 50,          # ...only if utilization is still below this %
+}
+
+THRESHOLD_CHOICES = [70, 80, 90, 95]
+SESSION_UNUSED_CHOICES = [15, 30, 60]   # minutes
+WEEKLY_UNUSED_CHOICES = [6, 12, 24]     # hours
+UNUSED_MAX_CHOICES = [30, 50, 70]       # %
+
+
+def load_settings():
+    cfg = dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            cfg.update(json.load(f) or {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return cfg
+
+
+def save_settings(cfg):
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Credentials / account
 # ---------------------------------------------------------------------------
 class AuthError(Exception):
@@ -285,6 +327,10 @@ class ClaudeBarApp:
         self.error = None
         self.last_fetch = 0.0
         self.lock = threading.Lock()
+        self.settings = load_settings()
+        # Track which alerts have already fired so we don't spam every poll.
+        self.fired = {"session_low": False, "weekly_low": False,
+                      "session_unused": False, "weekly_unused": False}
         self.icon = pystray.Icon(
             "claude-bar",
             icon=render_icon(None, None, error=True),
@@ -328,6 +374,7 @@ class ClaudeBarApp:
             pystray.MenuItem(weekly_text, None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Details", self._details_menu()),
+            pystray.MenuItem("Notifications", self._notifications_menu()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(status_text, None, enabled=False),
             pystray.MenuItem("Refresh Now", self._on_refresh),
@@ -395,6 +442,74 @@ class ClaudeBarApp:
                 visible=lambda _: bool(self.usage) and u().get("spend_enabled")),
         )
 
+    # -- notifications submenu ----------------------------------------------
+    def _set_setting(self, key, value, reset_flags=()):
+        def fn(icon, item):
+            self.settings[key] = value
+            for f in reset_flags:
+                self.fired[f] = False
+            save_settings(self.settings)
+        return fn
+
+    def _toggle_setting(self, key, reset_flags=()):
+        def fn(icon, item):
+            self.settings[key] = not self.settings.get(key)
+            for f in reset_flags:
+                self.fired[f] = False
+            save_settings(self.settings)
+        return fn
+
+    def _choice_items(self, key, choices, suffix, reset_flags=()):
+        items = []
+        for v in choices:
+            items.append(pystray.MenuItem(
+                "%d%s" % (v, suffix),
+                self._set_setting(key, v, reset_flags),
+                radio=True,
+                checked=(lambda v: lambda _: self.settings.get(key) == v)(v),
+            ))
+        return pystray.Menu(*items)
+
+    def _notifications_menu(self):
+        return pystray.Menu(
+            # --- Running low ---
+            pystray.MenuItem(
+                "Running-low alerts",
+                self._toggle_setting("low_enabled"),
+                checked=lambda _: self.settings.get("low_enabled")),
+            pystray.MenuItem(
+                "Session alert at",
+                self._choice_items("session_threshold", THRESHOLD_CHOICES, "%",
+                                   ("session_low",))),
+            pystray.MenuItem(
+                "Weekly alert at",
+                self._choice_items("weekly_threshold", THRESHOLD_CHOICES, "%",
+                                   ("weekly_low",))),
+            pystray.Menu.SEPARATOR,
+            # --- Unused quota ---
+            pystray.MenuItem(
+                "Unused-quota reminders",
+                self._toggle_setting("unused_enabled"),
+                checked=lambda _: self.settings.get("unused_enabled")),
+            pystray.MenuItem(
+                "Session: remind before reset",
+                self._choice_items("session_unused_minutes", SESSION_UNUSED_CHOICES,
+                                   " min", ("session_unused",))),
+            pystray.MenuItem(
+                "Weekly: remind before reset",
+                self._choice_items("weekly_unused_hours", WEEKLY_UNUSED_CHOICES,
+                                   " h", ("weekly_unused",))),
+            pystray.MenuItem(
+                "Only if usage below",
+                self._choice_items("unused_max_util", UNUSED_MAX_CHOICES, "%",
+                                   ("session_unused", "weekly_unused"))),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Send test notification", self._test_notification),
+        )
+
+    def _test_notification(self, icon, item):
+        self._notify("Claude Bar", "Notifications are working ✓")
+
     # -- actions -------------------------------------------------------------
     def _on_refresh(self, icon, item):
         threading.Thread(target=self.refresh, args=(True,), daemon=True).start()
@@ -430,6 +545,66 @@ class ClaudeBarApp:
         except Exception as e:  # noqa: BLE001 - never let the tray die
             self.error = "Error: %s" % e
         self._update_icon()
+        self._check_alerts()
+
+    # -- notifications -------------------------------------------------------
+    def _notify(self, title, message):
+        try:
+            self.icon.notify(message, title)
+        except Exception:  # noqa: BLE001 - notifications are best-effort
+            pass
+
+    def _secs_to_reset(self, key):
+        dt = self.usage.get(key + "_reset") if self.usage else None
+        if not dt:
+            return None
+        return (dt - datetime.now(timezone.utc)).total_seconds()
+
+    def _check_alerts(self):
+        if not self.usage:
+            return
+        s = self.settings
+
+        # 1) Running-low alerts (usage climbed past a threshold).
+        for key, label, thr_key in (
+            ("session", "Session (5h)", "session_threshold"),
+            ("weekly", "Weekly (7d)", "weekly_threshold"),
+        ):
+            flag = key + "_low"
+            pct = self.usage.get(key)
+            thr = s.get(thr_key, 80)
+            if s.get("low_enabled") and pct is not None and pct >= thr:
+                if not self.fired[flag]:
+                    self.fired[flag] = True
+                    self._notify(
+                        "Claude usage running low",
+                        "%s is at %d%% (alert ≥ %d%%)." % (label, round(pct), thr))
+            elif pct is None or pct < thr:
+                self.fired[flag] = False
+
+        # 2) Unused-quota reminders (reset is near but lots of quota is left).
+        max_util = s.get("unused_max_util", 50)
+        windows = (
+            ("session", "Session (5h)", s.get("session_unused_minutes", 30) * 60),
+            ("weekly", "Weekly (7d)", s.get("weekly_unused_hours", 12) * 3600),
+        )
+        for key, label, window_secs in windows:
+            flag = key + "_unused"
+            pct = self.usage.get(key)
+            secs = self._secs_to_reset(key)
+            in_window = secs is not None and 0 < secs <= window_secs
+            has_quota = pct is not None and pct < max_util
+            if s.get("unused_enabled") and in_window and has_quota:
+                if not self.fired[flag]:
+                    self.fired[flag] = True
+                    left = "%d min" % round(secs / 60) if secs < 3600 \
+                        else "%d h" % round(secs / 3600)
+                    self._notify(
+                        "Unused Claude quota",
+                        "%s resets in %s and only %d%% used — spend it or lose it."
+                        % (label, left, round(pct)))
+            elif not in_window or not has_quota:
+                self.fired[flag] = False
 
     def _update_icon(self):
         if self.usage:

@@ -22,10 +22,29 @@ no separate login. It's **read-only** and never makes inference calls.
   - Account: `email · Plan`
   - `Session (5h): NN%   resets HH:MM`
   - `Weekly (7d): NN%   resets Day HH:MM`
+  - **Details** submenu: plan, full reset timestamps, per-model weekly usage, extra-usage credits, spend.
+  - **Notifications** submenu (all configurable, see below)
   - Last-updated time (or an error message)
   - **Refresh Now**
   - **Start at Login** (toggle — adds/removes a Startup shortcut)
   - **Quit Claude Bar**
+
+## Notifications
+
+Native Windows toast notifications, configured from the **Notifications** submenu.
+There are two independent kinds, each with its own on/off toggle:
+
+- **Running-low alerts** — fire when usage climbs past a threshold, so you know
+  you're about to run out. Configurable per window (Session / Weekly at
+  70 / 80 / 90 / 95 %).
+- **Unused-quota reminders** — fire when a window is about to reset but you've
+  barely used it ("spend it or lose it"). Configure how long before the reset to
+  remind (Session 15/30/60 min, Weekly 6/12/24 h) and only remind when usage is
+  still below 30 / 50 / 70 %.
+
+Each alert fires once per crossing (no spam) and re-arms after the condition
+clears or the window resets. Use **Send test notification** to verify toasts
+work. Settings persist to `%USERPROFILE%\.claude-bar-windows.json`.
 
 ## How it works
 
