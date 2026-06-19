@@ -31,20 +31,89 @@ no separate login. It's **read-only** and never makes inference calls.
 
 ## Notifications
 
-Native Windows toast notifications, configured from the **Notifications** submenu.
-There are two independent kinds, each with its own on/off toggle:
+Native Windows toast notifications, configured entirely from the
+**Notifications** submenu in the tray. There are **two independent alert
+types**, each with its own on/off toggle, so you can enable either, both, or
+neither.
 
-- **Running-low alerts** — fire when usage climbs past a threshold, so you know
-  you're about to run out. Configurable per window (Session / Weekly at
-  70 / 80 / 90 / 95 %).
-- **Unused-quota reminders** — fire when a window is about to reset but you've
-  barely used it ("spend it or lose it"). Configure how long before the reset to
-  remind (Session 15/30/60 min, Weekly 6/12/24 h) and only remind when usage is
-  still below 30 / 50 / 70 %.
+### 1. Running-low alerts — "you're about to run out"
 
-Each alert fires once per crossing (no spam) and re-arms after the condition
-clears or the window resets. Use **Send test notification** to verify toasts
-work. Settings persist to `%USERPROFILE%\.claude-bar-windows.json`.
+Fires the moment your usage crosses a threshold. Default: **on**, both windows
+at **80 %**.
+
+- *Session alert at* — 70 / 80 / 90 / 95 %
+- *Weekly alert at* — 70 / 80 / 90 / 95 %
+
+Example toast:
+> **Claude usage running low**
+> Session (5h) is at 85 % (alert ≥ 80 %).
+
+### 2. Unused-quota reminders — "spend it or lose it"
+
+Fires when a window is about to reset but you've barely used it. Default:
+**off** (opt-in).
+
+- *Session: remind before reset* — 15 / 30 / 60 minutes
+- *Weekly: remind before reset* — 6 / 12 / 24 hours
+- *Only if usage below* — 30 / 50 / 70 % (shared by both windows)
+
+Example toast:
+> **Unused Claude quota**
+> Weekly (7d) resets in 5 h and only 10 % used — spend it or lose it.
+
+### Behavior
+
+- Each alert fires **once per crossing**. It re-arms when the condition clears
+  (usage drops back below threshold, you spend down to the unused threshold, or
+  the window resets).
+- Alerts are evaluated after every poll (every 3 minutes) and after every
+  manual **Refresh Now**.
+- **Send test notification** at the bottom of the submenu fires a sample toast
+  so you can confirm Windows toasts are enabled for this app.
+
+### Menu tree
+
+```
+Notifications ▸
+  ☑ Running-low alerts            (toggle)
+     Session alert at ▸  70% / 80% / 90% / 95%
+     Weekly alert at  ▸  70% / 80% / 90% / 95%
+  ─────────
+  ☐ Unused-quota reminders        (toggle, off by default)
+     Session: remind before reset ▸  15 min / 30 min / 60 min
+     Weekly:  remind before reset ▸  6 h / 12 h / 24 h
+     Only if usage below          ▸  30% / 50% / 70%
+  ─────────
+     Send test notification
+```
+
+### Configuration file
+
+All settings persist to `%USERPROFILE%\.claude-bar-windows.json`. You can edit
+it by hand (restart the app to pick up changes — or just use the menu). Schema
+and defaults:
+
+```jsonc
+{
+  "low_enabled":            true,   // master toggle for running-low alerts
+  "session_threshold":      80,     // % — fire when session usage hits this
+  "weekly_threshold":       80,     // % — fire when weekly usage hits this
+
+  "unused_enabled":         false,  // master toggle for unused-quota reminders
+  "session_unused_minutes": 30,     // remind when session resets within N min
+  "weekly_unused_hours":    12,     // remind when weekly resets within N hours
+  "unused_max_util":        50      // ...and only if usage is still below this %
+}
+```
+
+### Troubleshooting
+
+- **No toast appears.** Open Windows *Settings → System → Notifications* and
+  make sure notifications are enabled globally **and** in Focus Assist's "Do
+  not disturb" exception list, then click **Send test notification**.
+- **Alert never fires.** Check the master toggle for that alert type is on, and
+  that the threshold makes sense for your current usage. Use the **Details**
+  submenu to confirm the app sees your real numbers.
 
 ## How it works
 
