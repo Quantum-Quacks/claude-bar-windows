@@ -141,11 +141,41 @@ def fetch_usage():
         raise AuthError("Can't reach Anthropic")
 
     email, plan = read_account()
+    extra = data.get("extra_usage") or {}
+    spend = data.get("spend") or {}
+    limits = data.get("limits") or []
+
+    def severity_of(group):
+        for l in limits:
+            if l.get("group") == group:
+                return l.get("severity")
+        return None
+
+    def money(obj):
+        if not obj:
+            return None
+        amt = obj.get("amount_minor")
+        if amt is None:
+            return None
+        exp = obj.get("exponent", 2)
+        return amt / (10 ** exp), obj.get("currency", "")
+
     return {
         "session": effective_pct(data.get("five_hour")),
         "weekly": effective_pct(data.get("seven_day")),
         "session_reset": parse_reset((data.get("five_hour") or {}).get("resets_at")),
         "weekly_reset": parse_reset((data.get("seven_day") or {}).get("resets_at")),
+        "opus": effective_pct(data.get("seven_day_opus")),
+        "sonnet": effective_pct(data.get("seven_day_sonnet")),
+        "session_severity": severity_of("session"),
+        "weekly_severity": severity_of("weekly"),
+        "extra_enabled": bool(extra.get("is_enabled")),
+        "extra_credits": extra.get("used_credits"),
+        "extra_currency": extra.get("currency", ""),
+        "spend_enabled": bool(spend.get("enabled")),
+        "spend_percent": spend.get("percent"),
+        "spend_used": money(spend.get("used")),
+        "spend_limit": money(spend.get("limit")),
         "email": email,
         "plan": plan,
         "fetched_at": datetime.now(),
@@ -155,45 +185,64 @@ def fetch_usage():
 # ---------------------------------------------------------------------------
 # Icon rendering: two stacked horizontal battery-style bars
 # ---------------------------------------------------------------------------
+def _lighten(c, f=0.35):
+    return tuple(min(255, int(v + (255 - v) * f)) for v in c)
+
+
 def render_icon(session, weekly, error=False):
-    S = 64  # render large; Windows scales down crisply for the tray
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    # Render at high resolution; Windows scales it down crisply for the tray.
+    # 4x supersampling keeps the rounded corners smooth.
+    SS = 4
+    S = 64
+    W, H = S * SS, S * SS
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    margin_x = 6
-    bar_h = 18
-    gap = 8
+    # Use the full width so the bars read as "wide" as the square slot allows.
+    pad_x = 3 * SS
+    nub_w = 5 * SS
+    gap = 9 * SS
+    bar_h = 23 * SS
     total = bar_h * 2 + gap
-    top = (S - total) // 2
-    x0, x1 = margin_x, S - margin_x - 5  # leave room for the battery nub
-    nub_w = 4
-    radius = 4
+    top = (H - total) // 2
+    x0 = pad_x
+    x1 = W - pad_x - nub_w
+    radius = 7 * SS
 
     def draw_bar(y, pct):
-        # track
+        # outer track
         d.rounded_rectangle([x0, y, x1, y + bar_h], radius=radius,
-                            fill=TRACK, outline=OUTLINE, width=2)
-        # battery nub
-        nub_y0 = y + bar_h // 2 - 4
-        d.rounded_rectangle([x1 + 1, nub_y0, x1 + nub_w, nub_y0 + 8],
-                            radius=1, fill=OUTLINE)
+                            fill=TRACK, outline=OUTLINE, width=max(1, SS))
+        # battery nub on the right
+        nub_y0 = y + bar_h // 2 - 6 * SS
+        d.rounded_rectangle([x1 + SS, nub_y0, x1 + nub_w, nub_y0 + 12 * SS],
+                            radius=2 * SS, fill=OUTLINE)
         if pct is None:
             return
-        inner = max(0, x1 - x0 - 4)
+        inset = 3 * SS
+        inner = max(0, (x1 - x0) - 2 * inset)
         fill_w = int(round(inner * (pct / 100.0)))
         if fill_w > 0:
-            d.rounded_rectangle([x0 + 2, y + 2, x0 + 2 + fill_w, y + bar_h - 2],
-                                radius=2, fill=bar_color(pct))
+            col = bar_color(pct)
+            d.rounded_rectangle(
+                [x0 + inset, y + inset, x0 + inset + fill_w, y + bar_h - inset],
+                radius=max(1, radius - inset), fill=col)
+            # subtle top highlight for a glossier look
+            hl_h = max(SS, bar_h // 5)
+            d.rounded_rectangle(
+                [x0 + inset, y + inset, x0 + inset + fill_w, y + inset + hl_h],
+                radius=max(1, hl_h // 2), fill=_lighten(col, 0.4))
 
     if error:
         draw_bar(top, None)
         draw_bar(top + bar_h + gap, None)
-        # small red dot to signal a problem
-        d.ellipse([S - 16, 4, S - 4, 16], fill=RED)
+        r = 8 * SS
+        d.ellipse([W - r - 2 * SS, 2 * SS, W - 2 * SS, 2 * SS + r], fill=RED)
     else:
         draw_bar(top, session)
         draw_bar(top + bar_h + gap, weekly)
-    return img
+
+    return img.resize((S, S), Image.LANCZOS)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +263,13 @@ def fmt_reset(dt):
 
 def fmt_pct(p):
     return "--" if p is None else "%d%%" % round(p)
+
+
+def fmt_full(dt):
+    """Full local timestamp, e.g. 'Tue 23 Jun, 09:00'."""
+    if not dt:
+        return "—"
+    return dt.astimezone().strftime("%a %d %b, %H:%M")
 
 
 STARTUP_DIR = os.path.join(
@@ -271,6 +327,8 @@ class ClaudeBarApp:
             pystray.MenuItem(session_text, None, enabled=False),
             pystray.MenuItem(weekly_text, None, enabled=False),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Details", self._details_menu()),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem(status_text, None, enabled=False),
             pystray.MenuItem("Refresh Now", self._on_refresh),
             pystray.MenuItem(
@@ -280,6 +338,61 @@ class ClaudeBarApp:
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit Claude Bar", self._on_quit),
+        )
+
+    # -- details submenu -----------------------------------------------------
+    def _details_menu(self):
+        u = lambda: self.usage or {}
+
+        def has(key):
+            return lambda _: bool(self.usage) and u().get(key) is not None
+
+        def plan_text(_):
+            p = u().get("plan")
+            return "Plan: %s" % (p.title() if p else "—")
+
+        def session_full(_):
+            sev = u().get("session_severity")
+            tail = "  (%s)" % sev if sev and sev != "normal" else ""
+            return "Session resets: %s%s" % (fmt_full(u().get("session_reset")), tail)
+
+        def weekly_full(_):
+            sev = u().get("weekly_severity")
+            tail = "  (%s)" % sev if sev and sev != "normal" else ""
+            return "Weekly resets: %s%s" % (fmt_full(u().get("weekly_reset")), tail)
+
+        def opus_text(_):
+            return "Opus (7d): %s" % fmt_pct(u().get("opus"))
+
+        def sonnet_text(_):
+            return "Sonnet (7d): %s" % fmt_pct(u().get("sonnet"))
+
+        def extra_text(_):
+            c = u().get("extra_credits")
+            cur = u().get("extra_currency") or ""
+            return "Extra usage: %.2f %s used" % (c or 0.0, cur)
+
+        def spend_text(_):
+            used = u().get("spend_used")
+            limit = u().get("spend_limit")
+            pct = u().get("spend_percent")
+            if used and limit:
+                return "Spend: %.2f / %.2f %s (%s%%)" % (
+                    used[0], limit[0], used[1], pct if pct is not None else 0)
+            return "Spend: %s%%" % (pct if pct is not None else 0)
+
+        return pystray.Menu(
+            pystray.MenuItem(plan_text, None, enabled=False),
+            pystray.MenuItem(session_full, None, enabled=False),
+            pystray.MenuItem(weekly_full, None, enabled=False),
+            pystray.MenuItem(opus_text, None, enabled=False, visible=has("opus")),
+            pystray.MenuItem(sonnet_text, None, enabled=False, visible=has("sonnet")),
+            pystray.MenuItem(
+                extra_text, None, enabled=False,
+                visible=lambda _: bool(self.usage) and u().get("extra_enabled")),
+            pystray.MenuItem(
+                spend_text, None, enabled=False,
+                visible=lambda _: bool(self.usage) and u().get("spend_enabled")),
         )
 
     # -- actions -------------------------------------------------------------
