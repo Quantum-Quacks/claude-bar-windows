@@ -125,6 +125,15 @@ and defaults:
 
 ## Install & run
 
+### Option A — prebuilt binary (no Python needed)
+
+Grab the latest **`ClaudeBar.exe`** from the
+[Releases page](https://github.com/Quantum-Quacks/claude-bar-windows/releases),
+drop it anywhere (e.g. `%LOCALAPPDATA%\Programs\ClaudeBar\`), and double-click.
+Toggle **Start at Login** from the tray menu if you want it on boot.
+
+### Option B — run from source
+
 Requires **Python 3.8+** (you have 3.10).
 
 ```powershell
